@@ -1,0 +1,714 @@
+# -*- coding: utf-8 -*-
+"""hq2tr.py — 把 Obsidian md 里【带 ⭐ 或 ⏳ 的标题】做成 True Recall 的 basic 问答卡。
+
+模式名：标题问答 / 标题挖空（同一个东西：标题当问题，标题下正文当答案）。
+配套 skill: heading-to-true-recall
+
+用法
+----
+  python hq2tr.py "<md路径>" [<md路径2> ...]              预览，什么都不写
+  python hq2tr.py "<md路径>" --apply                      写 frontmatter flashcard_uid + 经 Local API 建卡
+  python hq2tr.py "<md路径>" --refresh [--apply]          库里的 Back 刷成本地最新(正文+标题链接)
+  python hq2tr.py "<md路径>" --no-source-text             不写 source_text(会失去"跳回原文"能力)
+  python hq2tr.py "<md路径>" --marks=⭐                   只认 ⭐ 的标题(默认 ⭐ 和 ⏳ 都认)
+  python hq2tr.py "<md路径>" --tail-only                  只认标题**末尾**的标记(默认出现即算)
+  python hq2tr.py "<md路径>" --skip=附录,对照表           标题含这些词的跳过
+  python hq2tr.py "<md路径>" --max-level=3                只做 ### 及以上的标题(默认 6,全部层级)
+  python hq2tr.py "<md路径>" --strip-marks                问题里去掉 𒋙 与 ⭐⏳(默认原样保留)
+  python hq2tr.py "<md路径>" --line-link                  末尾改用 adv-uri 行链接（**2026-10-10 起已是默认**，此参数保留为显式写法）
+  python hq2tr.py "<md路径>" --heading-link               末尾退回标题链接 [[笔记名#标题|标题]]（旧默认）
+  python hq2tr.py "<md路径>" --limit=30                   预览条数
+  python hq2tr.py "<md路径>" --token=<token>              v2.5.0 起 Local API 要鉴权
+
+这个 skill 出什么卡
+------------------
+  卡型  : builtin-basic（Front / Back 两个字段）
+  Front : 标题原文（去掉 `#` 标记；默认连 𒋙 与 ⭐⏳ 都原样保留）
+  Back  : 标题行下一行起、直到「下一个层级 ≤ 当前层级」的标题之前的全部正文，
+          末尾接一行 adv-uri 行链接（2026-10-10 广哥定；`--heading-link` 可退回标题链接）
+  范围  : 只做「标题里出现 ⭐ 或 ⏳」的标题（与位置无关，用户 2026-09-15 定）；
+          标题下正文为空则跳过。
+          ⚠️ 已知假阳性：带背7 的 `## 𒋙附录:考前必背30题与⭐标记对照表` 那个 ⭐ 是
+          正文用字 —— 排除用 --tail-only 或 --skip=附录,对照表，预览时逐条看 Q 也能发现
+
+为什么 Back 末尾是标题链接而不是行链接
+------------------------------------
+basic 卡型没有 Extra 字段（不像 cloze 是 `{{cloze:Text}}<br>{{Extra}}`），
+所以跳回入口只能接在 Back 末尾。这里用 Obsidian 原生标题链接
+`[[笔记名#标题原文|标题]]`（简写形态，别名固定「标题」两字）而不是 adv-uri 行链接：
+标题链接靠标题文本定位、笔记增删行都不会失效；行链接的行号一改就漂。
+代价是标题改名会让链接失效 —— 改完重跑 --refresh 即可。
+
+幂等
+----
+主键 = source_text（= 标题行原文，含 `## ` 前缀）。它经 GET /cards/:id 取回时是
+未渲染的原始值，与本地的逐字可比。**绝不能**拿 GET /notes/cards 的 question/answer
+当幂等键 —— 那是卡面渲染态（2026-09-15 血案：拿它比键导致每跑一次多一整批卡）。
+复跑必须打印「新增 0 张」，否则立刻停手。
+
+删卡安全
+--------
+**删任何一张卡都只删它自己**（2026-09-15 实测 + 源码级核对）。连带删除只有两支，都不命中：
+  · cloze 支 = 同源笔记 + 同 `clozeTemplate` 的全部卡（判据是 SQL 级"逐字相同"，
+    没有"块"这一层概念）；**本脚本建的卡根本不写 `clozeTemplate`**
+    （POST /cards 只传 noteTypeId/fields/sourceUid/sourceText；createCardFromGenerated
+    无此键，SQLite cards 表也无该列 ⇒ 恒为 undefined，而该支要求它非空）
+    ⇒ 这一支整个不触发；带该字段的只有手工建卡 / Collect / Anki 导入 / updateClozeTemplate。
+  · 反卡支 = 同**一条 note** 里 `template_ord != self` 的另一张（LIMIT 1）
+    ⇒ `POST /cards` 是逐条建 note+card（一张卡一条 note）⇒ 查不到目标。
+⇒ 本脚本建的卡：**无任何例外，删一张只删它自己**；"同一块里多张 cloze 卡才连坐"的旧
+说法已作废（那是把 cloze 支的集合误缩到了"块"）。
+所以 basic 与 cloze **混在同一篇笔记里是安全的**（旧版这里写的"一篇笔记只走一条
+路线、否则互相赔"是错的，已被实测证伪：删一张 basic 后 18 basic+2 cloze → 17+2，
+cloze 原封不动）。
+
+代价：每次重建/删卡都会留下空壳 note（插件任何删除入口都不删 notes 行），
+收尾按 highlight-to-true-recall 的第 9 步跑 QuickAdd 宏 TR清理。
+"""
+import os, re, sys, json, glob, uuid, sqlite3, subprocess
+import urllib.request, urllib.error
+from urllib.parse import quote
+
+VAULT = r"<vault>"
+PLUGIN_DIR = r"<vault>\.obsidian\plugins\true-recall"
+BASIC_TYPE = "builtin-basic"
+UID_FIELD = "flashcard_uid"
+UID_LEN = 8
+API_PORT_DEFAULT = 27182
+DEFAULT_MARKS = ("⭐", "⏳")
+
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# token 是插件级的（一个 vault 一个），两个 TR skill 共用同一份即可。
+TOKEN_FILES = [
+    os.path.join(SKILL_DIR, ".local-api-token"),
+    os.path.join(os.path.dirname(SKILL_DIR), "highlight-to-true-recall", ".local-api-token"),
+]
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+# ---------- 基础 ----------
+
+def find_db(vault=VAULT):
+    cands = glob.glob(os.path.join(vault, ".true-recall", "*", "*.db"))
+    cands = [c for c in cands if not c.endswith(".bak")]
+    if not cands:
+        raise SystemExit("找不到 True Recall 数据库(.true-recall/*/*.db)")
+    cands.sort(key=os.path.getmtime, reverse=True)
+    return cands[0]
+
+
+def read_settings():
+    try:
+        return json.load(open(os.path.join(PLUGIN_DIR, "data.json"), encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def api_port():
+    return int(read_settings().get("apiPort") or API_PORT_DEFAULT)
+
+
+def api_token():
+    for a in sys.argv[1:]:
+        if a.startswith("--token="):
+            return a.split("=", 1)[1].strip()
+    v = (os.environ.get("TRUE_RECALL_TOKEN") or "").strip()
+    if v:
+        return v
+    for p in TOKEN_FILES:
+        try:
+            v = open(p, encoding="utf-8").read().strip()
+            if v:
+                return v
+        except Exception:
+            continue
+    return ""
+
+
+def obsidian_running():
+    try:
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Obsidian.exe"], capture_output=True)
+        return "Obsidian.exe" in r.stdout.decode("gbk", errors="ignore")
+    except Exception:
+        return False
+
+
+def gen_uid():
+    return uuid.uuid4().hex[:UID_LEN]
+
+
+# 本机有系统代理(HTTP_PROXY/HTTPS_PROXY)，必须显式绕开，
+# 否则 127.0.0.1 的请求会被代理拦成 502 Bad Gateway。
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def api_call(path, payload=None, method=None, timeout=25):
+    url = "http://127.0.0.1:%d%s" % (api_port(), path)
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(url, data=body, method=method or ("POST" if body else "GET"))
+    if body:
+        req.add_header("Content-Type", "application/json")
+    tok = api_token()
+    if tok:
+        req.add_header("x-true-recall-token", tok)
+    try:
+        with _NO_PROXY.open(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        if e.code == 401:
+            raise RuntimeError(
+                "Local API 需要本机 token(%s) —— v2.5.0 起插件给所有路由加了鉴权。\n"
+                "→ Obsidian 设置 → True Recall → Local API → Copy token，然后三选一：\n"
+                "    ① 命令行 --token=<token>\n"
+                "    ② 环境变量 TRUE_RECALL_TOKEN\n"
+                "    ③ 写进 %s(一行,只放 token)" % ("当前没带 token" if not tok else "带了但不对",
+                                                   TOKEN_FILES[0]))
+        raise RuntimeError("Local API 返回 HTTP %d(%s)：%s" % (e.code, path, detail[:200]))
+    except urllib.error.URLError as e:
+        raise RuntimeError("连不上 Local API(%s)：%s\n"
+                           "→ 请在 Obsidian 设置 → True Recall → Local API 打开 Enable local API"
+                           % (url, e))
+    res = json.loads(raw)
+    if not res.get("ok"):
+        raise RuntimeError("API 返回错误：%s" % res.get("error"))
+    return res.get("data")
+
+
+_sql_query_ok = None
+
+
+def sql_query_ok():
+    global _sql_query_ok
+    if _sql_query_ok is None:
+        try:
+            api_call("/query", {"sql": "select 1 as n"}, timeout=5)
+            _sql_query_ok = True
+        except Exception:
+            _sql_query_ok = False
+            print("  (/query 不可用，已自动改用 GET /notes/cards 查卡 —— 不开那个开关也不影响建卡)")
+    return _sql_query_ok
+
+
+def card_detail(cid):
+    d = api_call("/cards/%s" % cid)
+    return d.get("data") or d or {}
+
+
+def cards_by_uid(uid, with_source_text=True):
+    """降级查卡:GET /notes/cards?source_uid=…（只返活卡）。
+
+    返回 [(card_id, {'Question':…, 'Answer':…, 'SourceText':…})]。
+    ⚠️ question/answer 是**卡面渲染态**，只能当弱键；sourceText 才是原文字节。
+    ⚠️ limit 必须显式给，该接口默认只返 50 条。
+    """
+    d = api_call("/notes/cards?source_uid=%s&limit=200" % uid)
+    out = []
+    for c in (d.get("cards") or []):
+        cid = c.get("id")
+        if not cid:
+            continue
+        rec = {"Question": c.get("question") or "", "Answer": c.get("answer") or "",
+               "SourceText": ""}
+        if with_source_text:
+            try:
+                rec["SourceText"] = (card_detail(cid).get("sourceText") or "")
+            except Exception:
+                pass
+        out.append((cid, rec))
+    return out
+
+
+# ---------- 行链接（--line-link 时用） ----------
+
+ANCHOR_LEN = 40
+_vault_id_cache = None
+
+
+def vault_id():
+    global _vault_id_cache
+    if _vault_id_cache is not None:
+        return _vault_id_cache
+    _vault_id_cache = ""
+    try:
+        p = os.path.join(os.environ.get("APPDATA", ""), "obsidian", "obsidian.json")
+        d = json.load(open(p, encoding="utf-8"))
+        for k, v in (d.get("vaults") or {}).items():
+            if os.path.normcase(os.path.normpath(v.get("path", ""))) == \
+               os.path.normcase(os.path.normpath(VAULT)):
+                _vault_id_cache = k
+                break
+    except Exception:
+        pass
+    return _vault_id_cache
+
+
+def line_uri(rel_path, line, anchor=None):
+    parts = []
+    vid = vault_id() or os.path.basename(VAULT)
+    if vid:
+        parts.append("vault=" + quote(vid, safe=""))
+    parts.append("filepath=" + quote(rel_path, safe=""))
+    parts.append("line=%d" % line)
+    parts.append("column=1&openmode=true&view-mode=source")
+    if anchor:
+        parts.append("anchor=" + quote(anchor, safe=""))
+    return "obsidian://adv-uri?" + "&".join(parts)
+
+
+# ---------- frontmatter ----------
+
+FM_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.S)
+UID_RE = re.compile(r"^flashcard_uid:\s*[\"']?([a-f0-9]+)[\"']?\s*$", re.M)
+
+
+def read_uid(text):
+    m = FM_RE.match(text)
+    if not m:
+        return None
+    m2 = UID_RE.search(m.group(1))
+    return m2.group(1) if m2 else None
+
+
+def set_uid(text, uid):
+    if read_uid(text):
+        return text, False
+    m = FM_RE.match(text)
+    if m:
+        head = m.group(1)
+        new_head = head + "\n" + "%s: %s" % (UID_FIELD, uid)
+        return text[:m.start(1)] + new_head + text[m.end(1):], True
+    return "---\n%s: %s\n---\n" % (UID_FIELD, uid) + text, True
+
+
+# ---------- 解析:标题 → 知识区 ----------
+
+# 标题里若含这些字符，wikilink 的 target 会被拆坏，只能退回行链接
+LINK_UNSAFE = ("#", "|", "[", "]")
+HEAD_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
+
+
+def scan_headings(lines):
+    """返回 [(行号0基, 层级, 标题文本)]，跳过代码围栏内的伪标题。"""
+    out = []
+    in_code = False
+    for i, ln in enumerate(lines):
+        st = ln.strip()
+        if st.startswith("```") or st.startswith("~~~"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        m = HEAD_RE.match(ln.rstrip())
+        if m:
+            out.append((i, len(m.group(1)), m.group(2).strip()))
+    return out
+
+
+def build_sections(lines, marks=DEFAULT_MARKS, max_level=6, tail_only=False, skip=()):
+    """挑出「标题含 marks」的标题，并算出它的正文范围。
+
+    正文范围 = 标题行的下一行 起，到「下一个 层级 <= 本层级 的标题」之前。
+    所以子标题（层级更深）连同它的内容自动并入本区答案。
+
+    命中判据 = **标题里出现 ⭐ 或 ⏳ 即算**（用户 2026-09-15 定："就是标题中含有
+    那两个符号"，且"也许以后会放在标题前面"，所以不绑末尾位置）。
+    ⚠️ 已知假阳性：带背7 的 `## 𒋙附录:考前必背30题与⭐标记对照表` 里那个 ⭐ 是标题
+    正文的一部分，按"含 ⭐"会把整张对照表建成一题 —— 用 --tail-only（只认末尾）或
+    --skip=附录,对照表 排除；预览时逐条看 Q 也能当场发现。
+    """
+    heads = scan_headings(lines)
+    tail_re = re.compile(r"[%s]+\s*$" % "".join(re.escape(mk) for mk in marks))
+
+    def hit(txt):
+        if any(w in txt for w in skip):
+            return False
+        if tail_only:
+            return bool(tail_re.search(txt))
+        return any(mk in txt for mk in marks)
+
+    out = []
+    for k, (i, lv, txt) in enumerate(heads):
+        if lv > max_level:
+            continue
+        if not hit(txt):
+            continue
+        end = len(lines)          # 开区间
+        for j, lv2, _t in heads[k + 1:]:
+            if lv2 <= lv:
+                end = j
+                break
+        s, e = i + 1, end
+        while s < e and not lines[s].strip():
+            s += 1
+        while e > s and not lines[e - 1].strip():
+            e -= 1
+        out.append({"level": lv, "start": i, "end": e - 1, "title": txt,
+                    "body_lines": (s, e - 1)})
+    return out
+
+
+def clean_title(title, strip_marks=False):
+    """问题文本。默认原样（用户 2026-09-15 定：𒋙 与 ⭐⏳ 都可以不去）。"""
+    t = title.strip()
+    if strip_marks:
+        t = t.replace("𒋙", "")
+        for mk in DEFAULT_MARKS:
+            t = t.replace(mk, "")
+        t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
+def heading_link(base, title):
+    """Obsidian 标题链接（简写形态：别名固定「标题」两字）。"""
+    return "[[%s#%s|标题]]" % (base, title)
+
+
+def section_anchor(lines, sec):
+    s = (lines[sec["start"]] or "").strip()
+    return s[:ANCHOR_LEN] if s else None
+
+
+def build_cards(lines, secs, base, rel_path, strip_marks=False,
+                url_extra=True, use_source_text=True, force_line_link=False):
+    cards = []
+    for n, sec in enumerate(secs, 1):
+        s, e = sec["body_lines"]
+        body = "\n".join(lines[s:e + 1]).strip("\n").rstrip()
+        if not body.strip():
+            continue
+        title = clean_title(sec["title"], strip_marks)
+        raw_title = sec["title"]
+        if url_extra:
+            if force_line_link or any(ch in raw_title for ch in LINK_UNSAFE):
+                uri = line_uri(rel_path, sec["start"] + 1, section_anchor(lines, sec))
+                tail = "[《%s》·%s](%s)" % (base, title, uri)
+            else:
+                tail = heading_link(base, raw_title)
+            back = body + "\n\n" + tail
+        else:
+            back = body
+        cards.append({
+            "n": n, "line": sec["start"] + 1, "level": sec["level"],
+            "Front": title, "Back": back, "body": body,
+            "source_text": lines[sec["start"]].rstrip() if use_source_text else None,
+        })
+    return cards
+
+
+# ---------- 写库（Local API） ----------
+
+def _norm_fields(s):
+    """fields_json 归一化：解析后按「紧凑 + 键排序」重序列化。
+
+    插件落库是紧凑 JSON，Python json.dumps 默认带空格 —— 解析后相等、字符串不等，
+    直接比字符串会永远匹配不上、每跑一次重建一批（2026-09-14 踩过两次）。
+    """
+    try:
+        return json.dumps(json.loads(s), ensure_ascii=False,
+                          separators=(",", ":"), sort_keys=True)
+    except Exception:
+        return s
+
+
+def card_fields_key(front, back):
+    return _norm_fields(json.dumps({"Front": front, "Back": back}, ensure_ascii=False))
+
+
+def existing_keys(uid=None):
+    """只读查出「真正活着」的卡的两类键：(字段键集合, source_text 集合)。
+
+    优先 /query（读插件内存、写入后立即可见）；v2.5.0 起 /query 常被
+    apiEnableSqlQuery(默认关) 挡成 403，则降级 GET /notes/cards + 逐张 /cards/:id。
+    降级时字段键永远匹配不上（那边是渲染态），但 **source_text 键照样命中**，
+    所以幂等仍然成立 —— 这条正是 2026-09-15 血案的修法。
+    """
+    if uid and not sql_query_ok():
+        try:
+            rows = cards_by_uid(uid, with_source_text=True)
+            have_fields = {card_fields_key(r.get("Question", ""), r.get("Answer", ""))
+                           for _, r in rows}
+            have_st = {r["SourceText"].strip() for _, r in rows if r.get("SourceText")}
+            return have_fields, have_st
+        except Exception as e:
+            print("  (按 uid 查卡失败，退回只读读库：%s)" % str(e).splitlines()[0])
+    sql = ("select n.fields_json, n.source_text from notes n join cards c on c.note_id = n.id "
+           "where n.deleted_at is null and c.deleted_at is null")
+    try:
+        d = api_call("/query", {"sql": sql})
+        hf, hs = set(), set()
+        for r in d.get("rows", []):
+            try:
+                fj = json.loads(r["fields_json"])
+            except Exception:
+                continue
+            hf.add(card_fields_key(fj.get("Front", ""), fj.get("Back", "")))
+            if r.get("source_text"):
+                hs.add(r["source_text"].strip())
+        return hf, hs
+    except Exception as e:
+        print("  (API 幂等查询失败，退回读磁盘：%s)" % str(e).splitlines()[0])
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % find_db().replace("\\", "/"), uri=True)
+        cur = con.cursor()
+        hf, hs = set(), set()
+        for fj_s, st in cur.execute(sql):
+            try:
+                fj = json.loads(fj_s)
+            except Exception:
+                continue
+            hf.add(card_fields_key(fj.get("Front", ""), fj.get("Back", "")))
+            if st:
+                hs.add(st.strip())
+        con.close()
+        return hf, hs
+    except Exception as e:
+        print("  (只读查库失败，跳过幂等检查：%s)" % e)
+        return set(), set()
+
+
+def post_cards(todo, uid):
+    """分批提交（body 上限 2MB，每批 20 张足够）。"""
+    added = failed = 0
+    B = 20
+    for i in range(0, len(todo), B):
+        chunk = todo[i:i + B]
+        payload = {"cards": [{"question": c["Front"], "answer": c["Back"],
+                              "card_type": "basic", "source_uid": uid,
+                              "source_text": c.get("source_text") or ""} for c in chunk],
+                   "source_uid": uid}
+        try:
+            res = api_call("/cards", payload)
+            added += int(res.get("created") or 0)
+            failed += len(chunk) - int(res.get("created") or 0)
+        except RuntimeError as e:
+            print("  批量建卡失败，退回逐张：%s" % e)
+            for c in chunk:
+                try:
+                    added += int(api_call("/cards", {
+                        "cards": [{"question": c["Front"], "answer": c["Back"],
+                                   "card_type": "basic", "source_uid": uid,
+                                   "source_text": c.get("source_text") or ""}],
+                        "source_uid": uid}).get("created") or 0)
+                except RuntimeError as e2:
+                    failed += 1
+                    print("  建卡失败(第 %d 区 / %s)：%s" % (c["n"], c["Front"][:20], e2))
+    return added, failed
+
+
+def apply_cards_api(cards, uid):
+    have_fields, have_st = existing_keys(uid=uid)
+    todo = []
+    for c in cards:
+        st = (c.get("source_text") or "").strip()
+        if st and st in have_st:
+            continue
+        if card_fields_key(c["Front"], c["Back"]) in have_fields:
+            continue
+        todo.append(c)
+    skipped = len(cards) - len(todo)
+    if not todo:
+        print("新增 0 张 / 已存在跳过 %d 张 / 失败 0 张" % skipped)
+        return
+    added, failed = post_cards(todo, uid)
+    print("新增 %d 张 / 已存在跳过 %d 张 / 失败 %d 张" % (added, skipped, failed))
+
+
+# ---------- 刷新已有卡（正文 + 标题链接） ----------
+
+def card_rows(uid):
+    """返回 [(card_id, fields_dict)]。
+
+    优先 /query（原文）；否则 GET /notes/cards（**渲染态**，只能当弱判据）；
+    都不行退只读 SQLite（原文，但插件落盘有延迟）。
+    """
+    if not sql_query_ok():
+        try:
+            rows = cards_by_uid(uid)
+            return [(cid, {"Front": r.get("Question", ""), "Back": r.get("Answer", ""),
+                           "_rendered": True}) for cid, r in rows]
+        except Exception as e:
+            print("  (按 uid 查卡不可用，退回只读读库：%s)" % str(e).splitlines()[0])
+    sql = ("select c.id as card_id, n.fields_json as fj from cards c "
+           "join notes n on n.id = c.note_id "
+           "where c.deleted_at is null and n.deleted_at is null "
+           "and n.source_uid = '%s' order by n.created_at" % uid)
+    try:
+        d = api_call("/query", {"sql": sql})
+        return [(r["card_id"], json.loads(r["fj"])) for r in d.get("rows", [])]
+    except Exception as e:
+        print("  (API 查卡不可用，退回只读读库：%s)" % str(e).splitlines()[0])
+    con = sqlite3.connect("file:%s?mode=ro" % find_db().replace("\\", "/"), uri=True)
+    try:
+        return [(r[0], json.loads(r[1])) for r in con.execute(sql)]
+    finally:
+        con.close()
+
+
+def refresh_cards(cards, uid, apply_):
+    """把库里每张卡的 Back 刷成本地最新（正文改了、标题改名都靠它）。
+
+    只动 fields.Back：Front 不变、source_text 不变、FSRS 调度不变 ⇒ 不重置复习进度。
+    """
+    by_front = {c["Front"]: c for c in cards}
+    rows = card_rows(uid)
+    print("库里属于本笔记的活跃卡：%d 张（本次本地算出 %d 张）" % (len(rows), len(cards)))
+    todo = []
+    same = unknown = 0
+    for cid, f in rows:
+        cur_front = (f.get("Front") or "").strip()
+        c = by_front.get(cur_front)
+        if c is None:
+            unknown += 1
+            continue
+        cur_back = (f.get("Back") or "").rstrip()
+        if not f.get("_rendered") and cur_back == c["Back"].rstrip():
+            same += 1
+            continue
+        todo.append((cid, c, cur_back, f.get("_rendered")))
+    print("需改 %d 张 / 已是最新 %d 张 / 认不出对应标题跳过 %d 张"
+          % (len(todo), same, unknown))
+    for cid, c, old, rendered in todo[:3]:
+        tag = "（渲染态比对，可能重复写同样内容）" if rendered else ""
+        print("   %s %s" % (c["Front"][:40], tag))
+        print("     旧 Back 尾: %s" % (old[-70:] if old else "(空)"))
+        print("     新 Back 尾: %s" % c["Back"][-70:])
+    if len(todo) > 3:
+        print("   ...(其余 %d 张同形)" % (len(todo) - 3))
+    if not todo or not apply_:
+        if todo:
+            print("\n[预览] 未写回。加 --apply 才真正更新（需 Obsidian 在跑 + Local API 开着）。")
+        return
+    ok = fail = 0
+    for cid, c, old, rendered in todo:
+        try:
+            api_call("/cards/%s/update" % cid, {"answer": c["Back"]})
+            ok += 1
+        except RuntimeError as e:
+            fail += 1
+            print("   %s 更新失败：%s" % (c["Front"][:30], e))
+    print("已更新 %d 张 / 失败 %d 张" % (ok, fail))
+
+
+# ---------- 主 ----------
+
+def main():
+    argv = sys.argv[1:]
+    apply_ = "--apply" in argv
+    refresh = "--refresh" in argv
+    use_source_text = "--no-source-text" not in argv
+    url_extra = "--plain-back" not in argv
+    strip_marks = "--strip-marks" in argv
+    # 2026-10-10 广哥定：默认改走 adv-uri 行链接。
+    #   原因 = 复习卡面里 wikilink 的 `#标题` 锚不跳（TR 内嵌编辑器未实现锚点跳转），
+    #   而 adv-uri 行链接在卡面里可正常跳转（广哥实测）。
+    #   `--heading-link` 可退回旧的标题链接形态。
+    force_line_link = "--heading-link" not in argv
+    tail_only = "--tail-only" in argv
+    skip = ()
+    marks = DEFAULT_MARKS
+    max_level = 6
+    limit = 20
+    for a in argv:
+        if a.startswith("--marks="):
+            marks = tuple(ch for ch in a.split("=", 1)[1] if ch.strip())
+        elif a.startswith("--max-level="):
+            max_level = int(a.split("=", 1)[1])
+        elif a.startswith("--skip="):
+            skip = tuple(w.strip() for w in a.split("=", 1)[1].split(",") if w.strip())
+        elif a.startswith("--limit="):
+            limit = int(a.split("=", 1)[1])
+    paths = [a for a in argv if not a.startswith("--")]
+    if not paths:
+        raise SystemExit(__doc__)
+    paths = [p if os.path.isabs(p) else os.path.join(VAULT, p) for p in paths]
+    for p in paths:
+        if not os.path.exists(p):
+            raise SystemExit("文件不存在：%s" % p)
+
+    try:
+        st = api_call("/status", timeout=5)
+        print("Local API 在线：", json.dumps(st, ensure_ascii=False)[:120])
+    except RuntimeError as e:
+        msg = str(e)
+        if "401" in msg or "token" in msg:
+            raise SystemExit(msg)
+        print("  (Local API 未连上，本次按只读读库预览：%s)" % msg.splitlines()[0])
+
+    print("触发标记：%s（%s）%s | 最大层级：%s | 写入路线：插件 Local API(端口 %d)"
+          % ("".join(marks), "只认标题末尾" if tail_only else "标题里出现即算",
+             ("| 跳过词：%s" % ",".join(skip)) if skip else "",
+             max_level if max_level < 6 else "全部", api_port()))
+    print("问题文本：%s | Back 末尾：%s"
+          % ("原样保留 𒋙 与 ⭐⏳" if not strip_marks else "已去掉 𒋙 与 ⭐⏳",
+             "标题链接 [[笔记#标题|标题]]" if not force_line_link else "adv-uri 行链接"))
+    print()
+
+    total_sections = total_cards = 0
+    for path in paths:
+        text = open(path, encoding="utf-8").read()
+        lines = text.split("\n")
+        base = os.path.splitext(os.path.basename(path))[0]
+        rel_path = os.path.relpath(path, VAULT).replace("\\", "/")
+
+        uid = read_uid(text)
+        uid_new = uid is None
+        if uid_new:
+            uid = gen_uid()
+
+        secs = build_sections(lines, marks, max_level, tail_only, skip)
+        cards = build_cards(lines, secs, base, rel_path, strip_marks,
+                            url_extra, use_source_text, force_line_link)
+        total_sections += len(secs)
+        total_cards += len(cards)
+
+        print("=" * 78)
+        print("文件：%s" % rel_path)
+        print("flashcard_uid：%s%s" % (uid, "（新生成，尚未写入）" if uid_new else "（已在 frontmatter）"))
+        print("命中标题（含 %s）：%d 个 → 拟建卡 %d 张%s"
+              % ("".join(marks), len(secs), len(cards),
+                 "" if len(cards) == len(secs) else "（%d 个标题下没有正文，跳过）" % (len(secs) - len(cards))))
+
+        if refresh:
+            print("== --refresh：把库里 Back 刷成本地最新 ==")
+            refresh_cards(cards, uid, apply_)
+            continue
+
+        for c in cards[:limit]:
+            b = c["Front"].replace("\n", " ")
+            print("  [#%-3d L%-4d h%d] Q: %s" % (c["n"], c["line"], c["level"], b[:90]))
+            bod = c["body"].replace("\n", " ⏎ ")
+            print("                 A: %s%s" % (bod[:100], "…" if len(bod) > 100 else ""))
+            if url_extra and c["n"] <= 2:
+                print("                 尾: %s" % c["Back"].rstrip().split("\n")[-1][:150])
+        if len(cards) > limit:
+            print("  ...(其余 %d 条省略，用 --limit=N 调整)" % (len(cards) - limit))
+
+        if not apply_:
+            continue
+
+        if uid_new:
+            new_text, changed = set_uid(text, uid)
+            if changed:
+                open(path, "w", encoding="utf-8", newline="").write(new_text)
+                print("已为笔记写入 frontmatter：%s: %s" % (UID_FIELD, uid))
+        apply_cards_api(cards, uid)
+
+    print("=" * 78)
+    print("合计：命中标题 %d 个 / 拟建卡 %d 张" % (total_sections, total_cards))
+    if not apply_ and not refresh:
+        print("[预览] 未做任何写入。确认无误后加 --apply。")
+    elif not apply_:
+        print("[预览] --refresh 未写回。确认无误后加 --apply。")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,44 @@
+{
+  "name": "obsidian-skills",
+  "description": "Obsidian 工作流技能集：True Recall 卡片创建、vault 写作规范、行跳转、PDF 转 vault 摘要、CSS 选择器调试等。",
+  "description_en": "Obsidian workflow skills: True Recall card creation, vault writing discipline, line jumping, PDF-to-vault summary, CSS selector debugging, and more.",
+  "owner": {
+    "name": "godfatherlg",
+    "email": ""
+  },
+  "metadata": {
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "obsidian-skills",
+      "description": "Obsidian 工作流技能集（16 个 skill）：True Recall 卡片、vault 写作、行跳转、PDF 摘要、CSS 调试等。",
+      "source": "./plugins/obsidian-skills",
+      "version": "1.0.0",
+      "category": "productivity",
+      "author": {
+        "name": "godfatherlg"
+      },
+      "homepage": "https://github.com/godfatherlg/obsidian-skills",
+      "license": "MIT",
+      "skills": [
+        "./plugins/obsidian-skills/skills/basic-to-cloze-true-recall",
+        "./plugins/obsidian-skills/skills/gaicuo",
+        "./plugins/obsidian-skills/skills/heading-to-true-recall",
+        "./plugins/obsidian-skills/skills/highlight-to-true-recall",
+        "./plugins/obsidian-skills/skills/obsidian-css-selector-debug",
+        "./plugins/obsidian-skills/skills/obsidian-diagram-to-png",
+        "./plugins/obsidian-skills/skills/obsidian-jump-line",
+        "./plugins/obsidian-skills/skills/obsidian-link-line-sync",
+        "./plugins/obsidian-skills/skills/obsidian-macro-debug",
+        "./plugins/obsidian-skills/skills/pdf-md-page-align",
+        "./plugins/obsidian-skills/skills/pdf-to-vault-summary",
+        "./plugins/obsidian-skills/skills/temp-note-workflow",
+        "./plugins/obsidian-skills/skills/vault-annotation-style",
+        "./plugins/obsidian-skills/skills/vault-content-summary",
+        "./plugins/obsidian-skills/skills/vault-write-discipline",
+        "./plugins/obsidian-skills/skills/write-into-note"
+      ]
+    }
+  ]
+}

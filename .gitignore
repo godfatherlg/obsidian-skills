@@ -1,0 +1,19 @@
+# Secrets / local credentials
+.local-api-token
+**/.local-api-token
+*.token
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/

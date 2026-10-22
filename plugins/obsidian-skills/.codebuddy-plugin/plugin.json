@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-skills",
+  "version": "1.0.0",
+  "description": "Obsidian 工作流技能集：True Recall 卡片创建、vault 写作规范、行跳转、PDF 转 vault 摘要、CSS 选择器调试等。",
+  "description_zh": "Obsidian 工作流技能集：True Recall 卡片创建、vault 写作规范、行跳转、PDF 转 vault 摘要、CSS 选择器调试等。",
+  "description_en": "Obsidian workflow skills: True Recall card creation, vault writing discipline, line jumping, PDF-to-vault summary, CSS selector debugging, and more.",
+  "author": {
+    "name": "godfatherlg",
+    "url": "https://github.com/godfatherlg"
+  },
+  "homepage": "https://github.com/godfatherlg/obsidian-skills",
+  "repository": "https://github.com/godfatherlg/obsidian-skills",
+  "license": "MIT",
+  "keywords": ["obsidian", "true-recall", "vault", "markdown", "skills"],
+  "category": "productivity"
+}
